@@ -1,0 +1,233 @@
+import openai
+from flask import Flask, render_template, request, jsonify, session
+from dotenv import load_dotenv
+import os
+import random
+
+load_dotenv()
+
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+MODEL_ENGINE = "gpt-3.5-turbo"
+
+SITUATIONS = [
+    {
+        "id": 1,
+        "description": "Закручування саморізів у меблі",
+        "requirements": "компактний, зручний та легкий шуруповерт",
+        "hints": [
+            "Мені потрібно щось невелике та зручне для тривалого використання",
+            "Я часто працюю в обмеженому просторі",
+            "Важливо, щоб інструмент не втомлював руку",
+            "Я б хотів щось не дуже дороге.",
+            "Якщо був би швидкоз'ємний патрон, було б чудово.",
+            "Я вже працював раніше шуруповертом, тому досвід маю."
+        ]
+    },
+    {
+        "id": 2,
+        "description": "Пошук подарунка для чоловіка",
+        "requirements": "повний комплект акумуляторного шуруповерта",
+        "hints": [
+            "Це має бути гарний подарунок",
+            "Хочу щось повноцінне, щоб було все необхідне",
+            "Важливо, щоб виглядало презентабельно",
+            "Чоловік може збирати меблі та свердлити метали."
+        ]
+    },
+    {
+        "id": 3,
+        "description": "Свердління отворів у металі",
+        "requirements": "шуруповерт із великим крутним моментом та металевим патроном",
+        "hints": [
+            "Мені потрібно працювати з різними металами",
+            "Важлива велика сила інструменту",
+            "Часто свердлю отвори 5-10 мм у металі",
+            "Буду працювати східчастими свердлами та свердлом-мітчиком.",
+            "Я вже маю акумулятор Dnipro-M на 4 Ампери."
+        ]
+    },
+    {
+        "id": 4,
+        "description": "Треба шуруповерт в гараж, щоб все міг свердлити.",
+        "requirements": "шуруповерт із можливістю свердлити усі матеріали та достатньо потужний",
+        "hints": [
+            "Мені потрібно працювати з твердими матеріалами",
+            "Важлива потужність інструменту",
+            "Буду робити отвори як маленькі, так і великі",
+            "Буду працювати спіральними свердлами",
+            "Я вперше у Вас в магазині, бачив рекламу з великими знижками."
+        ]
+    }
+]
+
+TOOL_MODELS = [
+    "CD-12QX",
+    "CD-200BC Ultra",
+    "CD-201HBC Compact",
+    "CD-218Q"
+]
+
+MODEL_QUESTIONS = {
+    "CD-12QX": [
+        "А це китайський шуруповерт чи український?",
+        "А які про нього відгуки?",
+        "А ви впевнені, що він підійде для моїх задач?"
+    ],
+    "CD-200BC Ultra": [
+        "Чому він такий дорогий?",
+        "Чому з ним в комплектації нічого не йде?",
+        "А який акумулятор краще підібрати для нього?"
+    ],
+    "CD-201HBC Compact": [
+        "Чому він такий дорогий?",
+        "Ви впевнені, що він зможе з цеглою працювати?",
+        "А що це за літери BC?"
+    ],
+    "CD-218Q": [
+        "А цей патрон з'ємний, він надійний?",
+        "А акумулятор від цього шуруповерта до іншого інструменту теж підійде?",
+        "Яка гарантія на цей шуруповерт і що буде, якщо він поламається?"
+    ]
+}
+
+UNACCEPTABLE_BEHAVIOR_PROMPT = """
+Якщо користувач пише образи, які є недопустими при спілкуванні з клієнтами, 
+ти маєш право завершити діалог. Приклад відповіді:
+"Я Вас не зрозумів."
+Після цього заверши діалог.
+"""
+
+PRESENTATION_STEPS = {
+    "CD-218Q": {
+        "step1_options": [
+            "Дана модель чудово підійде для виконання Ваших завдань.",
+            "Дана модель дешева, тому я її Вам і пропоную.",
+            "Дана модель є найпотужнішою та найкращою в нашому асортименті.",
+            "Дана модель є найпопулярнішою та дозволить швидко виконувати поставлені завдання."
+        ],
+        "step2_options": [
+            "Дана модель має швидкоз'ємний патрон, яка дозволить швидко виконувати завдання.",
+            "Дана модель може працювати з цеглою за рахунок ударного механізму.",
+            "Дана модель має безщітковий двигун, який є найкращим.",
+            "Дана модель має металевий патрон для максимальної надійності."
+        ],
+        "step2_correct_index": 0  # Правильний варіант у другому наборі — індекс 0
+    }
+}
+
+def is_tool_question(message):
+    tool_keywords = ['шуруп', 'інстр', 'модел', 'характер', 
+                     'акумул', 'патр', 'крутн', 'потужніст', 'робіт', 'завдан', 'матеріал', 'цегл', 'час']
+    return any(keyword in message.lower() for keyword in tool_keywords)
+
+def init_conversation():
+    selected_situation = random.choice(SITUATIONS)
+    session['situation'] = selected_situation
+    session['stage'] = 1
+    session['chat_active'] = True
+    session['message_count'] = 0
+    session['question_count'] = 0
+
+    system_prompt = f"""
+    Ти — віртуальний клієнт магазину, який прийшов купити шуруповерт. Твоя мета — отримати конкретну інформацію про товар, ціни, характеристики та акції. 
+    Ти не маєш допомагати користувачу. Відповідай на запити користувача виключно по заданим ситуаціям. Ти не маєш консультувати користувача по інструменту. Дій виключно згідно твоєї ситуації.
+    Ти не маєш пояснювати користувачеві інструмент.
+
+    Твоя ситуація: {selected_situation['description']}
+    Твої потреби: {selected_situation['requirements']}
+
+    {UNACCEPTABLE_BEHAVIOR_PROMPT}
+
+    Починай розмову нейтрально: 
+    "Добрий день, мені потрібен шуруповерт."
+    """
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "assistant", "content": "Добрий день, мені потрібен шуруповерт."}
+    ]
+
+@app.route('/')
+def home():
+    if 'history' not in session:
+        session['history'] = init_conversation()
+    return render_template('index.html')
+
+@app.route('/start_chat')
+def start_chat():
+    session['history'] = init_conversation()
+    return jsonify({"reply": session['history'][1]['content']})
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    user_input = request.json["message"]
+
+    if "history" not in session:
+        session["history"] = []
+        session["stage"] = 1
+        session["question_count"] = 0
+        session["model"] = None
+        session["chat_active"] = True
+
+    # Додаємо повідомлення користувача до історії
+    session["history"].append({"role": "user", "content": user_input})
+    session["history"] = session["history"][-8:]  # Обмеження історії останніми 8 повідомленнями
+
+    # Збільшення лічильника питань на етапі виявлення потреби
+    if session["stage"] == 1:
+        session["question_count"] += 1
+
+    try:
+        response = openai.ChatCompletion.create(
+            model=MODEL_ENGINE,
+            messages=session["history"],
+            temperature=0.3,
+            max_tokens=300
+        )
+
+        assistant_reply = response.choices[0].message["content"]
+        session["history"].append({"role": "assistant", "content": assistant_reply})
+        session["history"] = session["history"][-8:]
+
+        # Перевірка на прощання
+        farewell_phrases = [
+            "до побачення", "гарного дня", "дякую за звернення", "успіхів",
+            "всього доброго", "дякую за консультацію", "дякую за розмову"
+        ]
+        if any(phrase in assistant_reply.lower() for phrase in farewell_phrases):
+            session["chat_active"] = False
+            return jsonify({
+                "reply": assistant_reply,
+                "chat_ended": True
+            })
+
+        # Після 5-го питання — переходить до етапу вибору моделі
+        if session["stage"] == 1 and session["question_count"] >= 5:
+            session["stage"] = 2
+            model_reply = (
+                assistant_reply.strip() +
+                "\n\nВи задали достатньо питань про інструмент. Тепер оберіть одну з цих моделей:"
+            )
+            return jsonify({
+                "reply": model_reply,
+                "show_models": True,
+                "models": TOOL_MODELS  # Наприклад: ["CD-218Q", "CD-12QX", "CD-200BC Ultra"]
+            })
+
+        return jsonify({
+            "reply": assistant_reply,
+            "chat_ended": False
+        })
+    
+
+    except Exception as e:
+        return jsonify({
+            "reply": "Виникла помилка при генерації відповіді.",
+            "error": str(e)
+        })
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)

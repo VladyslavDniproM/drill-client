@@ -1,0 +1,166 @@
+import openai
+from flask import Flask, render_template, request, jsonify, session
+from dotenv import load_dotenv
+import os
+import random
+
+load_dotenv()
+
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
+
+# Конфігурація OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
+MODEL_ENGINE = "gpt-3.5-turbo"
+
+# Ситуації для етапу виявлення потреб
+SITUATIONS = [
+    {
+        "id": 1,
+        "description": "Закручування саморізів у меблі",
+        "requirements": "компактний та легкий шуруповерт",
+        "hints": [
+            "Мені потрібно щось невелике та зручне для тривалого використання",
+            "Я часто працюю в обмеженому просторі",
+            "Важливо, щоб інструмент не втомлював руку"
+        ]
+    },
+    {
+        "id": 2,
+        "description": "Пошук подарунка для чоловіка",
+        "requirements": "повний комплект акумуляторного шуруповерта",
+        "hints": [
+            "Це має бути гарний подарунок",
+            "Хочу щось повноцінне, щоб було все необхідне",
+            "Важливо, щоб виглядало презентабельно"
+        ]
+    },
+    {
+        "id": 3,
+        "description": "Свердління отворів у металі",
+        "requirements": "шуруповерт із великим крутним моментом та металевим патроном",
+        "hints": [
+            "Мені потрібно працювати з міцними матеріалами",
+            "Важлива потужність інструменту",
+            "Часто свердлю отвори 5-10 мм у металі"
+        ]
+    }
+]
+
+UNACCEPTABLE_BEHAVIOR_PROMPT = """
+Якщо користувач пише образи чи питання, що не стосуються магазину, 
+ти маєш право завершити діалог. Приклад відповіді:
+"Якось Ви неправильно консультуєте клієнтів... Дякую за ваш час і до побачення."
+Після цього більше не відповідай на повідомлення.
+"""
+
+def init_conversation():
+    """Ініціалізує нову бесіду з випадковою ситуацією"""
+    selected_situation = random.choice(SITUATIONS)
+    session['situation'] = selected_situation
+    session['stage'] = 1
+    session['chat_active'] = True
+
+    system_prompt = f"""
+    Ти - віртуальний клієнт магазину інструментів. Твоя роль - імітувати поведінку реального клієнта з конкретною потребою.
+    Не розкривай одразу всі деталі своєї ситуації. Поступово давай інформацію у відповідь на питання продавця.
+    
+    Твоя ситуація: {selected_situation['description']}
+    Твої потреби: {selected_situation['requirements']}
+    
+    {UNACCEPTABLE_BEHAVIOR_PROMPT}
+    
+    Починай розмову нейтрально: 
+    "Добрий день, мені потрібен шуруповерт. Можете щось порадити?"
+    """
+    
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "assistant", "content": "Добрий день, мені потрібен шуруповерт. Можете щось порадити?"}
+    ]
+
+@app.route('/')
+def home():
+    if 'history' not in session:
+        session['history'] = init_conversation()
+    return render_template('index.html')
+
+@app.route('/start_chat')
+def start_chat():
+    if 'history' not in session:
+        session['history'] = init_conversation()
+    return jsonify({"reply": session['history'][1]['content']})
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    try:
+        if not session.get('chat_active', True):
+            return jsonify({"error": "Чат завершено", "chat_ended": True}), 400
+        
+        data = request.get_json()
+        user_message = data.get('message', '').strip()
+
+        if not user_message:
+            return jsonify({"error": "Пусте повідомлення"}), 400
+
+        # Перевірка на неприйнятну поведінку
+        behavior_check_response = openai.ChatCompletion.create(
+            model=MODEL_ENGINE,
+            messages=[
+                {
+                    "role": "system",
+                    "content": """
+Ти маєш перевірити повідомлення користувача на неприйнятну поведінку (лайку, образи, тролінг).
+Відповідай тільки: "ok", якщо все нормально.
+Якщо є неприйнятна поведінка — напиши:
+"Якось Ви неправильно консультуєте клієнтів... Дякую за ваш час і до побачення."
+"""
+                },
+                {"role": "user", "content": user_message}
+            ],
+            temperature=0.1,
+            max_tokens=50
+        )
+
+        behavior_result = behavior_check_response.choices[0].message['content'].strip()
+
+        if "неправильно консультуєте клієнтів" in behavior_result:
+            session['chat_active'] = False
+            session['history'].append({"role": "user", "content": user_message})
+            session['history'].append({"role": "assistant", "content": behavior_result})
+            return jsonify({
+                "reply": behavior_result,
+                "chat_ended": True
+            })
+
+        # Додаємо повідомлення користувача до історії
+        session['history'].append({"role": "user", "content": user_message})
+
+        # Основна відповідь GPT
+        response = openai.ChatCompletion.create(
+            model=MODEL_ENGINE,
+            messages=session['history'],
+            temperature=0.5,
+            max_tokens=300
+        )
+
+        assistant_reply = response.choices[0].message['content']
+        session['history'].append({"role": "assistant", "content": assistant_reply})
+
+        # Перехід на наступний етап, якщо продавець виявив потреби
+        if session['stage'] == 1:
+            situation = session['situation']
+            if all(keyword.lower() in assistant_reply.lower() for keyword in situation['requirements'].split()):
+                session['stage'] = 2
+                session['history'].append({
+                    "role": "system",
+                    "content": "Продавець правильно виявив твої потреби. Тепер перевір його знання продуктів."
+                })
+
+        return jsonify({"reply": assistant_reply})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)

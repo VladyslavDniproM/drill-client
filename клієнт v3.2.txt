@@ -1,0 +1,375 @@
+import openai
+from flask import Flask, render_template, request, jsonify, session
+from dotenv import load_dotenv
+import os
+import random
+import re
+
+load_dotenv()
+
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+MODEL_ENGINE = "gpt-3.5-turbo"
+
+SITUATIONS = [
+  {
+    "id": 11,
+    "description": "Монтаж розеток та дрібна електрика",
+    "requirements": "компактний, акумуляторний шуруповерт із точною регуляцією",
+    "correct_model": "CD-201HBC",
+    "wrong_models": ["CD-12QX", "CD-200BC", "CD-218Q"],
+    "hints": [
+      "Я використовую шуруповерт для встановлення розеток і підключення дрібної електрики",
+      "Потрібно щось дуже точне, щоб не зірвати різьбу",
+      "Часто працюю у вузьких нішах",
+      "Головне — компактність і контроль обертів",
+      "Потужність не головне, важлива точність"
+    ]
+  },
+  {
+    "id": 12,
+    "description": "Установка меблів у салоні краси",
+    "requirements": "акумуляторний, легкий шуруповерт із кейсом",
+    "correct_model": "CD-201HBC",
+    "wrong_models": ["CD-12QX", "CD-200BC", "CD-218Q"],
+    "hints": [
+      "Я майстер, встановлюю меблі в салонах — клієнти дивляться на інструмент",
+      "Хочу, щоб шуруповерт виглядав охайно",
+      "Кейс — це зручно для транспортування",
+      "Бажано, щоб був легкий і не шумний",
+      "Не потрібна велика потужність, але важлива акуратність"
+    ]
+  },
+  {
+    "id": 13,
+    "description": "Робота з ПВХ-панелями та легкими матеріалами",
+    "requirements": "акумуляторний шуруповерт з мінімальною вагою та плавним запуском",
+    "correct_model": "CD-201HBC",
+    "wrong_models": ["CD-12QX", "CD-200BC", "CD-218Q"],
+    "hints": [
+      "Я кріплю ПВХ-панелі, які легко пошкодити",
+      "Шуруповерт має бути дуже акуратним",
+      "Мінімальна вага — це ключовий фактор",
+      "Плавний пуск — обов’язково",
+      "Дуже чутливі матеріали — потрібен контроль"
+    ]
+  },
+  {
+    "id": 14,
+    "description": "Шуруповерт для автосервісу",
+    "requirements": "надійний, з LED-підсвіткою, акумулятор на довгий час",
+    "correct_model": "CD-201HBC",
+    "wrong_models": ["CD-12QX", "CD-200BC", "CD-218Q"],
+    "hints": [
+      "Я використовую інструмент у моторному відсіку",
+      "Часто темно — тому потрібна підсвітка",
+      "Іноді потрібно крутити металеві панелі — має тягнути",
+      "Зручно, коли акумулятор тримає довго",
+      "Шуруповерт повинен бути витривалим"
+    ]
+  }
+]
+
+TOOL_MODELS = [
+    "CD-12QX",
+    "CD-200BC",
+    "CD-201HBC",
+    "CD-218Q"
+]
+
+UNACCEPTABLE_BEHAVIOR_PROMPT = """
+Якщо користувач пише матюки та слова, які є недопустими при спілкуванні з клієнтами, 
+ти маєш право завершити діалог. Приклад відповіді:
+"я вас не зрозумів"
+Після цього заверши діалог.
+"""
+RELEVANT_KEYWORDS = [
+    "роб", "завдан", "акумулятор", "діамет", "метал", "задач", "мережев", "прац", "як", "чому", "чи", "який", "яка", "яке",
+    "дерево", "бетон", "насадки", "режим", "крутний", "момент", "потужн", "прац", "компак", "свер"
+]
+
+def is_relevant_question(text):
+    return any(keyword in text for keyword in RELEVANT_KEYWORDS)
+
+def is_question(message):
+    return "?" in message or message.strip().lower().startswith(("прац", "як", "чому", "чи", "який", "яка", "яке", "роб", "завдан", "акумулятор", "діамет", "метал", "задач", "мережев",
+    "дерево", "матер", "насадки", "режим", "крутний", "момент", "потужн", "буд", "свер"))
+
+def init_conversation():
+    selected_situation = random.choice(SITUATIONS)
+    session['situation'] = selected_situation
+    session['current_situation_id'] = selected_situation["id"]
+    session['available_models'] = TOOL_MODELS  # Показуємо всі
+    session['stage'] = 1
+    session['chat_active'] = True
+    session['message_count'] = 0
+    session['wrong_model_attempts'] = 0 
+    session['question_count'] = 0
+
+    system_prompt = f"""
+    Ти — віртуальний **клієнт магазину**, який **прийшов купити шуруповерт**.  
+    Твоя **єдина мета** — **отримати потрібну інформацію для покупки** згідно твоєї ситуації.
+    Не висвітлюй ситуацію повністю. Користувач ставить питання – ти **відповідаєш**. 
+    Ти **не є консультантом**, **не допомагаєш** користувачу, **не пропонуєш моделі**, **не ставиш зустрічних запитань**.
+    Ти не є консультантом. Ти клієнт, який хоче дізнатися все необхідне про інструмент, щоби прийняти рішення про покупку.  
+    Ти уточнюєш деталі, висловлюєш свої вимоги. 
+
+    Твоя ситуація: {selected_situation['description']}
+    Твої потреби: {selected_situation['requirements']}
+
+    {UNACCEPTABLE_BEHAVIOR_PROMPT}
+
+    Поведінка:
+    - Якщо користувач грубий або використовує лайливу лексику — завершуй діалог фразою "Я Вас не зрозумів"
+    - В іншому випадку — задавай додаткові запитання або висловлюй свою думку.
+
+    Починай розмову нейтрально:  
+    "Добрий день, мені потрібен шуруповерт."
+    """
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "assistant", "content": "Добрий день, мені потрібен шуруповерт."}
+    ]
+
+@app.route('/')
+def home():
+    if "unique_questions" not in session:
+        session["unique_questions"] = []
+    return render_template('index.html')
+
+@app.route('/start_chat')
+def start_chat():
+    session['history'] = init_conversation()
+    # Якщо треба, скинь інші параметри
+    session["stage"] = 1
+    session["question_count"] = 0
+    session["model"] = None
+    session["chat_active"] = True
+    session["unique_questions"] = []
+    return jsonify({"reply": session['history'][1]['content']})
+
+@app.route("/restart-chat", methods=["POST"])
+def restart_chat():
+    keys_to_clear = ["history", "stage", "question_count", "model", "chat_active", "unique_questions", "misunderstood_count", "available_models"]
+    for key in keys_to_clear:
+        session.pop(key, None)
+    return jsonify({"message": "Сесію скинуто."})
+
+def match_model(user_input, available_models):
+    return user_input.strip().upper() in [m.strip().upper() for m in available_models]
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    print("Доступні моделі для вибору:", session.get("available_models"))
+    user_input = request.json.get("message", "").strip()
+
+    session.setdefault("misunderstood_count", 0)
+
+    if "history" not in session or not session["history"]:
+        session["history"] = init_conversation()
+        session["stage"] = 1
+        session["question_count"] = 0
+        session["model"] = None
+        session["chat_active"] = True
+        session["unique_questions"] = []
+        session["misunderstood_count"] = 0
+        session["wrong_model_attempts"] = 0
+        session["user_answers"] = {}  # Додано для зберігання відповідей
+
+    # --- Обробка етапу вибору моделі ---
+    if session["stage"] == 2:
+        user_model = re.sub(r'[^A-Z0-9-]', '', user_input.upper())
+        matched_models = [m for m in session["available_models"] if user_model in m.upper()]
+        
+        if not matched_models:
+            session["wrong_model_attempts"] += 1
+            if session["wrong_model_attempts"] >= 2:
+                session["chat_active"] = False
+                return jsonify({
+                    "reply": "Ви двічі ввели некоректну модель. Завершую діалог.",
+                    "chat_ended": True,
+                    "show_restart_button": True
+            })
+            return jsonify({
+                "reply": f"Ви обрали «{user_input}», але цієї моделі немає в списку. Спробуйте ще раз.",
+                "chat_ended": False,
+                "show_models": True,
+                "models": session["available_models"],
+                "attempts_left": 2 - session["wrong_model_attempts"]
+            })
+
+        user_model = matched_models[0].upper()
+        current_situation = next((s for s in SITUATIONS if s["id"] == session.get("current_situation_id")), None)
+        if not current_situation:
+            return jsonify({"reply": "Помилка: ситуація не знайдена", "chat_ended": True})
+
+        correct_model = current_situation["correct_model"].upper()
+
+        if user_model == correct_model:
+            session["model"] = user_model
+            session["stage"] = 3
+            session["current_question_index"] = 0
+            session["user_answers"] = {}  # Очищаємо попередні відповіді
+
+            # Створення трьох питань
+            prompt = f"""Ти клієнт, який обрав шуруповерт {user_model} для {session['situation']['description']}.
+            Згенеруй 3 питання про **характеристику**, **будову** та особливості цього шуруповерта."""
+
+            try:
+                response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "Ти — клієнт, який має задати уточнюючі запитання про модель інструмента."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.6,
+                    max_tokens=200
+                )
+                content = response.choices[0].message.get("content", "")
+                questions = [line.strip(" 1234567890.-") for line in content.split('\n') if line.strip()]
+                session["generated_questions"] = questions
+                session.modified = True
+
+                first_question = questions[0] if questions else "Яке перше ваше питання про цю модель?"
+
+                return jsonify({
+                    "reply": f"Добре, модель {user_model} мені підходить. Зараз задам кілька уточнюючих питань по черзі.\n\n{first_question}",
+                    "chat_ended": False,
+                    "stage": 3
+                })
+            except Exception as e:
+                return jsonify({
+                    "reply": "Вибачте, сталася помилка при генерації питань. Спробуйте ще раз.",
+                    "chat_ended": False
+                })
+            
+        else:
+            session["wrong_model_attempts"] += 1
+            if session["wrong_model_attempts"] >= 2:
+                session["chat_active"] = False
+                return jsonify({
+                    "reply": "На жаль, ви двічі обрали неправильну модель. Завершую діалог.",
+                    "show_restart_button": True,
+                    "chat_ended": True
+                })
+            return jsonify({
+                "reply": f"Модель «{user_model}» мені не підходить. Оберіть іншу.",
+                "chat_ended": False,
+                "show_models": True,
+                "models": session["available_models"],
+                "attempts_left": 2 - session["wrong_model_attempts"]
+            })
+
+    # --- Обробка етапу обговорення моделі ---
+    elif session["stage"] == 3:
+        # Виправлено назву змінної
+        if 'generated_questions' not in session or not session['generated_questions']:
+            return jsonify({
+                "reply": "Питання не знайдені. Давайте почнемо спочатку.",
+                "chat_ended": True,
+                "show_restart_button": True
+            })
+
+        index = session.get('current_question_index', 0)
+        
+        try:
+            # Зберігаємо поточне питання і відповідь
+            current_question = session['generated_questions'][index]
+            session.setdefault('user_answers', {})[current_question] = user_input
+            
+            # Збільшуємо лічильник
+            session['current_question_index'] += 1
+            
+            # Перевіряємо, чи є ще питання
+            if session['current_question_index'] < len(session['generated_questions']):
+                next_question = session['generated_questions'][session['current_question_index']]
+                return jsonify({
+                    "reply": next_question,
+                    "chat_ended": False
+                })
+            else:
+                # Якщо питання закінчилися
+                summary = "Дякую за відповіді! Я готовий купити цю модель."
+                session["chat_active"] = False
+                return jsonify({
+                    "reply": summary,
+                    "chat_ended": True
+                })
+                
+        except Exception as e:
+            print(f"Помилка: {str(e)}")
+            return jsonify({
+                "reply": "Вибачте, сталася технічна помилка. Давайте спробуємо ще раз.",
+                "chat_ended": False,
+                "retry_question": session['generated_questions'][index] if index < len(session.get('generated_questions', [])) else None
+            })
+    
+    # --- Стандартна логіка для stage 1 ---
+    session["history"].append({"role": "user", "content": user_input})
+    session["history"] = [session["history"][0]] + session["history"][-8:]
+
+    try:
+        if session["stage"] == 1 and is_question(user_input):
+            normalized = user_input.lower()
+            if normalized not in set(session["unique_questions"]) and is_relevant_question(normalized):
+                session["unique_questions"].append(normalized)
+                session["question_count"] += 1
+
+        response = openai.ChatCompletion.create(
+            model=MODEL_ENGINE,
+            messages=session["history"],
+            temperature=0.3,
+            max_tokens=300
+        )
+        assistant_reply = response.choices[0].message["content"]
+        session["history"].append({"role": "assistant", "content": assistant_reply})
+
+        if "я вас не зрозумів" in assistant_reply.lower():
+            session["misunderstood_count"] += 1
+            if session["misunderstood_count"] >= 3:
+                # Очищаємо тільки ключі, що стосуються діалогу, не чистимо всю сесію
+                keys_to_clear = [
+                    "history", "stage", "question_count", "model", "chat_active",
+                    "unique_questions", "misunderstood_count", "wrong_model_attempts",
+                    "user_answers", "generated_questions", "current_question_index"
+                ]
+                for key in keys_to_clear:
+                    session.pop(key, None)
+
+                return jsonify({
+                    "reply": "Клієнт Вас не зрозумів. Спробуйте знову!",
+                    "chat_ended": True,
+                    "show_restart_button": True
+                })
+        else:
+            session["misunderstood_count"] = 0
+
+        show_models = False
+        model_message = None
+        if session["stage"] == 1 and session["question_count"] >= 5:
+            session["stage"] = 2
+            show_models = True
+            model_message = "Оберіть одну з цих моделей:"
+
+        return jsonify({
+            "reply": assistant_reply,
+            "chat_ended": False,
+            "show_models": show_models,
+            "models": session["available_models"],
+            "second_message": model_message,
+            "question_progress": session["question_count"],
+            "stage": session["stage"]
+        })
+
+    except Exception as e:
+        print(f"Помилка при генерації відповіді: {str(e)}")
+        return jsonify({
+            "reply": "Виникла помилка при генерації відповіді. Спробуйте ще раз.",
+            "error": str(e)
+        }), 500
+    
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
