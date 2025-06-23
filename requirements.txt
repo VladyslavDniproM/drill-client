@@ -1,4 +1,1 @@
-Flask
-gunicorn
-openai
-python-dotenv
+pip freeze > requirements.txt
