@@ -616,6 +616,8 @@ def chat():
         })
 
     except Exception as e:
+        print("[ERROR]", e)
+        print(traceback.format_exc())
         return jsonify({
             "reply": "Виникла помилка при генерації відповіді. Спробуйте ще раз.",
             "error": str(e)
