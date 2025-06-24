@@ -5,6 +5,8 @@ import os
 import random
 import re
 import traceback
+import logging
+logging.basicConfig(level=logging.DEBUG)
 
 load_dotenv()  # Тепер ця функція буде визначена
 
@@ -296,6 +298,9 @@ def match_model(user_input, available_models):
 def chat():
     print("Доступні моделі для вибору:", session.get("available_models"))
     user_input = request.json.get("message", "").strip()
+
+    if not request.json or "message" not in request.json:
+        return jsonify({"error": "Invalid request"}), 400
 
     session.setdefault("misunderstood_count", 0)
     session.setdefault("objection_round", 1)
