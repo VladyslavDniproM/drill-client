@@ -1,10 +1,12 @@
+from dotenv import load_dotenv  # Додайте цей імпорт на початку файлу
 import openai
 from flask import Flask, render_template, request, jsonify, session
-# from dotenv import load_dotenv
-# import os
+import os
 import random
 import re
 import traceback
+
+load_dotenv()  # Тепер ця функція буде визначена
 
 load_dotenv()
 
