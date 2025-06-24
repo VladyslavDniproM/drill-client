@@ -1,9 +1,10 @@
 import openai
 from flask import Flask, render_template, request, jsonify, session
-from dotenv import load_dotenv
-import os
+# from dotenv import load_dotenv
+# import os
 import random
 import re
+import traceback
 
 load_dotenv()
 
@@ -616,12 +617,9 @@ def chat():
         })
 
     except Exception as e:
-        print("[ERROR]", e)
-        print(traceback.format_exc())
-        return jsonify({
-            "reply": "Виникла помилка при генерації відповіді. Спробуйте ще раз.",
-            "error": str(e)
-        }), 500
+            print("[ERROR]", e)
+            print(traceback.format_exc())
+            return jsonify({"reply": "Сталася внутрішня помилка сервера. Спробуйте ще раз.", "chat_ended": False}), 500
     
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
