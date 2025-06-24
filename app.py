@@ -1,22 +1,24 @@
-from dotenv import load_dotenv  # Додайте цей імпорт на початку файлу
-import openai
+from dotenv import load_dotenv
+from openai import OpenAI  # Новий імпорт
 from flask import Flask, render_template, request, jsonify, session
 import os
 import random
 import re
 import traceback
 import logging
+
 logging.basicConfig(level=logging.DEBUG)
-
-load_dotenv()  # Тепер ця функція буде визначена
-
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", os.urandom(24))
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Ініціалізація клієнта OpenAI
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # Новий спосіб ініціалізації
 MODEL_ENGINE = "gpt-3.5-turbo"
+
+# ... (ваш існуючий код для SITUATIONS, TOOL_MODELS, UNACCEPTABLE_BEHAVIOR_PROMPT, RELEVANT_KEYWORDS залишається без змін) ...
+
 
 SITUATIONS = [
   {
@@ -234,7 +236,7 @@ def init_conversation():
     selected_situation = random.choice(SITUATIONS)
     session['situation'] = selected_situation
     session['current_situation_id'] = selected_situation["id"]
-    session['available_models'] = TOOL_MODELS  # Показуємо всі
+    session['available_models'] = TOOL_MODELS
     session['stage'] = 1
     session['chat_active'] = True
     session['message_count'] = 0
@@ -266,6 +268,8 @@ def init_conversation():
         {"role": "system", "content": system_prompt},
         {"role": "assistant", "content": "Добрий день, мені потрібен шуруповерт."}
     ]
+
+# ... (ваш існуючий код для маршрутів /, /start_chat, /restart-chat залишається без змін) ...
 
 @app.route('/')
 def home():
@@ -348,7 +352,7 @@ def chat():
             Ти маєш проаналізувати відповідь користувача на коректність відповіді. Якщо він написав просто цифру, не зараховуй її як правильну."""
 
             try:
-                response = openai.ChatCompletion.create(
+                response = client.chat.completions.create(  # Новий синтаксис
                     model="gpt-3.5-turbo",
                     messages=[
                         {"role": "system", "content": "Ти — клієнт, який задає уточнюючі питання про модель інструмента."},
@@ -357,7 +361,7 @@ def chat():
                     temperature=0.6,
                     max_tokens=200
                 )
-                content = response.choices[0].message.get("content", "")
+                content = response.choices[0].message.content  # Новий спосіб отримання вмісту
                 # Розбиваємо текст на питання (кожне з нового рядка)
                 questions = [line.strip("1234567890.- ") for line in content.split("\n") if line.strip()]
                 session["generated_questions"] = questions
@@ -420,7 +424,7 @@ def chat():
         gpt_prompt = f"Питання: '{current_question}'\nВідповідь: '{user_input}'\n\nЧи стосується ця відповідь суті питання? Відповідай тільки 'так' або 'ні'."
 
         try:
-            validation = openai.ChatCompletion.create(
+            validation = client.chat.completions.create(  # Новий синтаксис
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "Ти перевіряєш відповідність відповіді суті питання. Відповідай лише 'так' або 'ні'."},
@@ -429,7 +433,7 @@ def chat():
                 temperature=0,
                 max_tokens=100
             )
-            is_relevant = validation.choices[0].message["content"].strip().lower()
+            is_relevant = validation.choices[0].message.content.strip().lower()  # Новий спосіб отримання вмісту
 
             if is_relevant != "так":
                 session["off_topic_count"] = session.get("off_topic_count", 0) + 1
@@ -490,7 +494,7 @@ def chat():
             gpt_prompt = f"Клієнт сказав: '{objection}'. Продавець відповів: '{seller_reply}'. Напиши коротку відповідь клієнта, яка містить сумнів або уточнення, без остаточного рішення."
 
             try:
-                response = openai.ChatCompletion.create(
+                response = client.chat.completions.create(  # Новий синтаксис
                     model="gpt-3.5-turbo",
                     messages=[
                         {"role": "system", "content": "Ти — клієнт магазину інструментів. Твоя мета — сформулювати ввічливий сумнів або уточнення після відповіді продавця на заперечення."},
@@ -500,7 +504,7 @@ def chat():
                     max_tokens=100
                 )
 
-                reply = response.choices[0].message["content"].strip()
+                reply = response.choices[0].message.content.strip()  # Новий спосіб отримання вмісту
                 session["objection_round"] = 2
                 session["last_seller_reply"] = seller_reply
 
@@ -522,9 +526,9 @@ def chat():
             )
 
             try:
-                print(f"[DEBUG] GPT prompt:\n{gpt_prompt}")  # Дебаг
+                print(f"[DEBUG] GPT prompt:\n{gpt_prompt}")
 
-                result = openai.ChatCompletion.create(
+                result = client.chat.completions.create(  # Новий синтаксис
                     model="gpt-3.5-turbo",
                     messages=[
                     {
@@ -543,11 +547,11 @@ def chat():
                     max_tokens=10
                 )
 
-                rating = result.choices[0].message["content"].strip().lower()
-                print(f"[DEBUG] GPT оцінив як: '{rating}'")  # Для дебагу
+                rating = result.choices[0].message.content.strip().lower()  # Новий спосіб отримання вмісту
+                print(f"[DEBUG] GPT оцінив як: '{rating}'")
 
                 session["chat_active"] = False
-                session["objection_round"] = 1  # обнуляємо для наступного запуску
+                session["objection_round"] = 1
 
                 if rating == "переконливо":
                     reply = "Дякую, ви мене переконали! Я готовий зробити покупку."
@@ -561,7 +565,7 @@ def chat():
                 })
 
             except Exception as e:
-                print(f"[ERROR] {e}")  # Для дебагу
+                print(f"[ERROR] {e}")
                 return jsonify({
                     "reply": "Сталася помилка при оцінці відповіді. Спробуйте ще раз.",
                     "chat_ended": False
@@ -578,13 +582,13 @@ def chat():
                 session["unique_questions"].append(normalized)
                 session["question_count"] += 1
 
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(  # Новий синтаксис
             model=MODEL_ENGINE,
             messages=session["history"],
             temperature=0.3,
             max_tokens=300
         )
-        assistant_reply = response.choices[0].message["content"]
+        assistant_reply = response.choices[0].message.content  # Новий спосіб отримання вмісту
         session["history"].append({"role": "assistant", "content": assistant_reply})
 
         if "я вас не зрозумів" in assistant_reply.lower():
